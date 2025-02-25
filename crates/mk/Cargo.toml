@@ -1,0 +1,9 @@
+[package]
+name = "eusi"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+eusi-init = { workspace = true }
+clap = { workspace = true, features = ["derive"] }
+cpio = { workspace = true }

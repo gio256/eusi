@@ -1,0 +1,10 @@
+[workspace]
+resolver = "2"
+members = ["crates/mk", "crates/init"]
+
+[workspace.dependencies]
+eusi-init = { path = "crates/init", version = "0.1.0", artifact = "bin", target = "x86_64-unknown-linux-musl" }
+clap = "4"
+cpio = "0.4.1"
+# libc = "0.2.170"
+rustix = "0.38.44"
