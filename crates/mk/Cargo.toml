@@ -7,3 +7,5 @@ edition = "2024"
 eusi-init = { workspace = true }
 clap = { workspace = true, features = ["derive"] }
 cpio = { workspace = true }
+eyre = { workspace = true }
+rustix = { workspace = true, features = ["mm", "system"] }
