@@ -1,5 +1,5 @@
 # eusi
-Early userspace init.
+An experiment in [initramfs](https://en.wikipedia.org/wiki/Initial_ramdisk) (initial RAM file system) generation.
 
 ### Usage
 ```bash
