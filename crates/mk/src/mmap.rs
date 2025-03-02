@@ -1,13 +1,24 @@
 use rustix::{fd::AsFd, mm};
 use std::{fmt, fs::File, ops::Deref, ptr, slice};
+use thiserror::Error;
 
-pub struct Mmap {
+pub(crate) struct Mmap {
     ptr: *mut std::ffi::c_void,
     len: usize,
 }
 
+#[derive(Debug, Error)]
+pub(crate) enum MmapErr {
+    #[error("mmap failed with {0}")]
+    Os(#[from] rustix::io::Errno),
+    #[error("failed to retrieve metadata with {0}")]
+    Meta(#[from] std::io::Error),
+    #[error("failed to retrieve file size with {0}")]
+    Int(#[from] std::num::TryFromIntError)
+}
+
 impl Mmap {
-    pub fn new(f: File) -> eyre::Result<Self> {
+    pub(crate) fn new(f: File) -> Result<Self, MmapErr> {
         let len: usize = f.metadata()?.len().try_into()?;
         let ptr = unsafe {
             mm::mmap(

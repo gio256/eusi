@@ -14,13 +14,13 @@ pub(crate) struct Index<'a> {
 
 #[derive(Debug, Error)]
 pub(crate) enum IndexErr {
-    #[error("unknown magic bytes: {:02x?}", .0.to_le())]
+    #[error("unknown magic bytes {:02x?}", .0.to_le())]
     Magic(u32),
-    #[error("incompatible index version: {}", .0)]
+    #[error("incompatible index version {0}")]
     Version(u32),
-    #[error(transparent)]
+    #[error("index open failed with {0}")]
     Ptr(#[from] PtrErr),
-    #[error(transparent)]
+    #[error("index search failed with {0}")]
     Find(#[from] FindErr),
 }
 
@@ -42,6 +42,10 @@ impl<'a> Index<'a> {
 
     pub fn find(&self, key: &[u8]) -> Result<&'a CStr, IndexErr> {
         self.root.clone().find(key).map_err(Into::into)
+    }
+
+    pub fn find_wild(&self, key: &[u8]) -> Result<&'a CStr, IndexErr> {
+        self.root.clone().find_wild(key).map_err(Into::into)
     }
 }
 
@@ -100,8 +104,8 @@ pub(crate) enum PtrErr {
     Ascii,
     #[error("index overflow")]
     Overflow,
-    #[error(transparent)]
-    Cstr(#[from] std::ffi::FromBytesUntilNulError),
+    #[error("reading c string failed with {0}")]
+    CStr(#[from] std::ffi::FromBytesUntilNulError),
     #[error(transparent)]
     Slice(#[from] std::array::TryFromSliceError),
 }
@@ -221,7 +225,7 @@ struct Node<'a> {
 pub(crate) enum FindErr {
     #[error("not found")]
     NotFound,
-    #[error(transparent)]
+    #[error("search error: {0}")]
     Ptr(#[from] PtrErr),
     #[error("invalid child fields")]
     Desc,
@@ -286,13 +290,14 @@ impl<'a> Node<'a> {
 
     fn chop_prefix<'k>(&self, key: &'k [u8]) -> Option<&'k [u8]> {
         if let Some(prefix) = self.prefix {
+            dbg!(prefix);
             key.strip_prefix(prefix.to_bytes())
         } else {
             Some(key)
         }
     }
 
-    fn read_child(&self, char: u8) -> Result<Node<'a>, FindErr> {
+    fn read_child(&self, char: u8) -> Result<Self, FindErr> {
         let desc = self.desc.ok_or(FindErr::NoChild)?;
         if desc.first <= char && char <= desc.last {
             let child_idx = (char - desc.first) as usize;
@@ -306,6 +311,23 @@ impl<'a> Node<'a> {
     }
 
     fn find(self, key: &[u8]) -> Result<&'a CStr, FindErr> {
+        let key = self.chop_prefix(key).ok_or(FindErr::Prefix)?;
+        if let Some((x, xs)) = key.split_first() {
+            self.read_child(*x)?.find(xs)
+        } else if let Some(vals) = self.values
+            && vals.count > 0
+        {
+            //assert_eq!(vals.count, 1, "does this hold?"); //todo: rm debug
+            // ignore priority
+            let mut ptr = Ptr::new(self.buf, vals.idx + size_of::<u32>());
+            ptr.read_cstr().map_err(Into::into)
+        } else {
+            Err(FindErr::NoValues)
+        }
+    }
+
+    //todo
+    fn find_wild(self, key: &[u8]) -> Result<&'a CStr, FindErr> {
         let key = self.chop_prefix(key).ok_or(FindErr::Prefix)?;
         if let Some((x, xs)) = key.split_first() {
             self.read_child(*x)?.find(xs)
