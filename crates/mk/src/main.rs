@@ -2,7 +2,9 @@
 use cpio::newc;
 use std::fs::File;
 
+mod index;
 mod kmod;
+mod mmap;
 
 // see man 5 modules.dep, man 8 modinfo
 fn main() {
