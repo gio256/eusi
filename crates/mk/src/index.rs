@@ -1,5 +1,8 @@
+#![allow(unused)]
 use std::ffi::CStr;
 use std::fmt;
+use std::ops::Deref;
+use std::slice::SliceIndex;
 use std::{marker::PhantomData, mem::size_of};
 use thiserror::Error;
 
@@ -19,7 +22,7 @@ pub(crate) enum IndexErr {
     #[error("incompatible index version {0}")]
     Version(u32),
     #[error("index open failed with {0}")]
-    Ptr(#[from] PtrErr),
+    Read(#[from] ReadErr),
     #[error("index search failed with {0}")]
     Find(#[from] FindErr),
 }
@@ -27,16 +30,15 @@ pub(crate) enum IndexErr {
 impl<'a> Index<'a> {
     pub fn new(buf: &'a [u8]) -> Result<Self, IndexErr> {
         let mut ptr = Ptr::new(buf, 0);
-        let magic = ptr.read_u32()?;
+        let magic = ptr.read()?;
         if magic != INDEX_MAGIC {
             return Err(IndexErr::Magic(magic));
         }
-        let ver = ptr.read_u32()?;
+        let ver = ptr.read()?;
         if ver >> 16 != INDEX_VERSION_MAJOR {
             return Err(IndexErr::Version(ver));
         }
-        let root_offset = ptr.read_u32()?;
-        let root = Node::read(buf, root_offset)?;
+        let root = Node::read(buf, ptr.read()?)?;
         Ok(Self { root })
     }
 
@@ -44,8 +46,11 @@ impl<'a> Index<'a> {
         self.root.clone().find(key).map_err(Into::into)
     }
 
-    pub fn find_wild(&self, key: &[u8]) -> Result<&'a CStr, IndexErr> {
-        self.root.clone().find_wild(key).map_err(Into::into)
+    pub fn find_wild(&self, key: &[u8]) -> Result<(), IndexErr> {
+        let mut state = WildState::default();
+        self.root.clone().find_wild(key, &mut state)?;
+        dbg!(state.vals);
+        Ok(())
     }
 }
 
@@ -70,13 +75,13 @@ impl Offset {
     /// An offset with the descendants flag set contains the three child fields.
     const DESC: u32 = 0x20000000;
     /// The remainder of the offset stores the actual index into the file.
-    const IDX: u32 = 0x0FFFFFFF;
+    const CUR: u32 = 0x0FFFFFFF;
 
     const fn new(v: u32) -> Self {
         Self(v)
     }
-    const fn idx(&self) -> u32 {
-        self.0 & Self::IDX
+    const fn cur(&self) -> u32 {
+        self.0 & Self::CUR
     }
     const fn has_prefix(&self) -> bool {
         self.0 & Self::PREFIX > 0
@@ -90,14 +95,13 @@ impl Offset {
 }
 
 /// A pointer into the index file.
-#[derive(Clone)]
 struct Ptr<'a> {
     buf: &'a [u8],
-    idx: usize,
+    cur: usize,
 }
 
 #[derive(Debug, Error)]
-pub(crate) enum PtrErr {
+pub(crate) enum ReadErr {
     #[error("out of bounds index")]
     Oob,
     #[error("invalid ascii char")]
@@ -108,57 +112,101 @@ pub(crate) enum PtrErr {
     CStr(#[from] std::ffi::FromBytesUntilNulError),
     #[error(transparent)]
     Slice(#[from] std::array::TryFromSliceError),
+    #[error("invalid child fields")]
+    Desc,
 }
 
 impl fmt::Debug for Ptr<'_> {
     fn fmt(&self, f: &mut fmt::Formatter) -> Result<(), fmt::Error> {
         f.debug_struct("Ptr")
             .field("buf", &self.buf.as_ptr())
-            .field("idx", &format!("{:02x?}", self.idx))
+            .field("cur", &format!("{:02x?}", self.cur))
             .finish()
     }
 }
 
 impl<'a> Ptr<'a> {
-    fn new(buf: &'a [u8], idx: usize) -> Self {
-        Self { buf, idx }
+    fn new(buf: &'a [u8], cur: usize) -> Self {
+        Self { buf, cur }
+    }
+
+    /// Reads a value of type `T` from the buffer and advances the pointer
+    /// according to the `Read` implementation of `T`.
+    fn read<T>(&mut self) -> Result<T, ReadErr>
+    where
+        T: Read<'a>,
+    {
+        T::read_from_ptr(self)
     }
 
     /// Advances the pointer by `count` bytes.
-    fn skip(&mut self, count: usize) -> Result<(), PtrErr> {
-        self.idx = self.idx.checked_add(count).ok_or(PtrErr::Overflow)?;
+    fn add(&mut self, count: usize) -> Result<(), ReadErr> {
+        self.cur = self.cur.checked_add(count).ok_or(ReadErr::Overflow)?;
         Ok(())
     }
 
-    /// Reads an ascii char from the current pointer index, then advances the
-    /// pointer by one byte.
-    fn read_char(&mut self) -> Result<u8, PtrErr> {
-        let b = *self.buf.get(self.idx).ok_or(PtrErr::Oob)?;
-        if b <= ASCII_MAX {
-            self.idx += size_of::<u8>();
-            Ok(b)
-        } else {
-            Err(PtrErr::Ascii)
-        }
+    fn get_and_advance<const N: usize>(&mut self) -> Result<[u8; N], ReadErr> {
+        let end = self.cur + N;
+        let b = self
+            .buf
+            .get(self.cur..end)
+            .ok_or(ReadErr::Oob)?
+            .try_into()?;
+        self.cur = end;
+        Ok(b)
     }
 
-    /// Reads a `u32` from the current pointer index, then advances the pointer
-    /// by four bytes.
-    fn read_u32(&mut self) -> Result<u32, PtrErr> {
-        let end = self.idx + size_of::<u32>();
-        let b = self.buf.get(self.idx..end).ok_or(PtrErr::Oob)?.try_into()?;
-        self.idx = end;
-        Ok(u32::from_be_bytes(b))
-    }
+    //fn get<I>(&self, i: I) -> Option<&<I as SliceIndex<[u8]>>::Output>
+    //where
+    //    I: SliceIndex<[u8]>,
+    //{
+    //    self.buf.get(self.cur..)?.get(i)
+    //}
+}
 
-    /// Reads a `CStr` from the current pointer index, stopping at the first
-    /// null byte and advancing the pointer to the end of the string.
-    fn read_cstr(&mut self) -> Result<&'a CStr, PtrErr> {
-        let b = self.buf.get(self.idx..).ok_or(PtrErr::Oob)?;
+trait Read<'a> {
+    fn read_from_ptr(ptr: &mut Ptr<'a>) -> Result<Self, ReadErr>
+    where
+        Self: Sized;
+}
+
+impl Read<'_> for u32 {
+    fn read_from_ptr(ptr: &mut Ptr) -> Result<Self, ReadErr> {
+        ptr.get_and_advance::<{ size_of::<Self>() }>()
+            .map(u32::from_be_bytes)
+    }
+}
+
+impl<'a> Read<'a> for &'a CStr {
+    fn read_from_ptr(ptr: &mut Ptr<'a>) -> Result<Self, ReadErr> {
+        let b = ptr.buf.get(ptr.cur..).ok_or(ReadErr::Oob)?;
         let s = CStr::from_bytes_until_nul(b)?;
         // make sure we include the null byte
-        self.idx += s.count_bytes() + 1;
+        ptr.cur += s.count_bytes() + 1;
         Ok(s)
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, PartialOrd)]
+struct Char(u8);
+
+impl Deref for Char {
+    type Target = u8;
+
+    fn deref(&self) -> &u8 {
+        &self.0
+    }
+}
+
+impl Read<'_> for Char {
+    fn read_from_ptr(ptr: &mut Ptr) -> Result<Self, ReadErr> {
+        let b = *ptr.buf.get(ptr.cur).ok_or(ReadErr::Oob)?;
+        if b <= ASCII_MAX {
+            ptr.cur += size_of::<u8>();
+            Ok(Self(b))
+        } else {
+            Err(ReadErr::Ascii)
+        }
     }
 }
 
@@ -166,50 +214,102 @@ impl<'a> Ptr<'a> {
 #[derive(Debug, Clone, Copy)]
 struct Desc<'a> {
     // The ascii char representing the first child stored.
-    first: u8,
+    first: Char,
     // The ascii char representing the last child stored.
-    last: u8,
+    last: Char,
     // The index of the first child.
-    idx: usize,
-    _ref: PhantomData<&'a ()>,
+    cur: usize,
+    _ref: PhantomData<&'a [u8]>,
 }
 
 impl Desc<'_> {
-    fn new(first: u8, last: u8, idx: usize) -> Self {
+    fn new(first: Char, last: Char, cur: usize) -> Self {
         Self {
             first,
             last,
-            idx,
+            cur,
             _ref: PhantomData,
         }
     }
 }
 
+impl<'a> Read<'a> for Desc<'a> {
+    fn read_from_ptr(ptr: &mut Ptr) -> Result<Self, ReadErr> {
+        let first: Char = ptr.read()?;
+        let last: Char = ptr.read()?;
+        let cur = ptr.cur;
+        let child_count = last.checked_sub(*first).ok_or(ReadErr::Desc)? + 1;
+        ptr.add(size_of::<u32>() * child_count as usize)?;
+        Ok(Self::new(first, last, cur))
+    }
+}
+
 /// Each value is stored with a priority followed by a null-terminated string.
 #[allow(unused)]
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 struct Value<'a> {
     priority: u32,
     v: &'a CStr,
 }
 
+impl<'a> Read<'a> for Value<'a> {
+    fn read_from_ptr(ptr: &mut Ptr<'a>) -> Result<Self, ReadErr> {
+        let priority = ptr.read()?;
+        let v = ptr.read()?;
+        Ok(Self { priority, v })
+    }
+}
+
 /// The value fields of a trie node.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Copy)]
 struct Values<'a> {
     // The number of values stored.
     count: u32,
     // The index of the first value.
-    idx: usize,
-    _ref: PhantomData<&'a ()>,
+    cur: usize,
+    _ref: PhantomData<&'a [u8]>,
 }
 
 impl Values<'_> {
-    fn new(count: u32, idx: usize) -> Self {
+    fn new(count: u32, cur: usize) -> Self {
         Self {
             count,
-            idx,
+            cur,
             _ref: PhantomData,
         }
+    }
+}
+
+impl<'a> Read<'a> for Values<'a> {
+    fn read_from_ptr(ptr: &mut Ptr) -> Result<Self, ReadErr> {
+        let count = ptr.read()?;
+        Ok(Self::new(count, ptr.cur))
+    }
+}
+
+#[derive(Debug, Clone, Default)]
+struct StrBuf {
+    v: Vec<u8>
+}
+
+impl StrBuf {
+    fn push_cstr(&mut self, s: &CStr, cur: usize) -> usize {
+        s.to_bytes().get(cur..).map(|b| {
+            self.v.extend_from_slice(b);
+            b.len()
+        }).unwrap_or_default()
+    }
+    fn push(&mut self, b: u8) {
+        self.v.push(b)
+    }
+    fn pop(&mut self) {
+        self.v.pop();
+    }
+    fn popn(&mut self, count: usize) {
+        self.v.truncate(self.v.len().saturating_sub(count))
+    }
+    fn str(&self) -> Result<&str, FindErr> {
+        std::str::from_utf8(&self.v).map_err(Into::into)
     }
 }
 
@@ -226,15 +326,17 @@ pub(crate) enum FindErr {
     #[error("not found")]
     NotFound,
     #[error("search error: {0}")]
-    Ptr(#[from] PtrErr),
-    #[error("invalid child fields")]
-    Desc,
+    Read(#[from] ReadErr),
     #[error("no child")]
     NoChild,
     #[error("prefix mismatch")]
     Prefix,
     #[error("no values")]
     NoValues,
+    #[error("could not decode string: {0}")]
+    BadUtf8(#[from] std::str::Utf8Error),
+    #[error("invalid glob patter: {0}")]
+    Pattern(#[from] glob::PatternError)
 }
 
 impl fmt::Debug for Node<'_> {
@@ -251,35 +353,16 @@ impl fmt::Debug for Node<'_> {
 impl<'a> Node<'a> {
     fn read(buf: &'a [u8], ost: u32) -> Result<Self, FindErr> {
         let ost = Offset::new(ost);
-        let idx = ost.idx() as usize;
-        if idx == 0 || buf.len() <= idx {
+        let cur = ost.cur() as usize;
+        if cur == 0 || buf.len() <= cur {
             return Err(FindErr::NotFound);
         }
-        let mut ptr = Ptr::new(buf, idx);
+        let mut ptr = Ptr::new(buf, cur);
 
-        let prefix = if ost.has_prefix() {
-            Some(ptr.read_cstr()?)
-        } else {
-            None
-        };
+        let prefix = ost.has_prefix().then(|| ptr.read()).transpose()?;
+        let desc = ost.has_desc().then(|| ptr.read()).transpose()?;
+        let values = ost.has_values().then(|| ptr.read()).transpose()?;
 
-        let desc = if ost.has_desc() {
-            let first = ptr.read_char()?;
-            let last = ptr.read_char()?;
-            let idx = ptr.idx;
-            let child_count = last.checked_sub(first).ok_or(FindErr::Desc)? + 1;
-            ptr.skip(size_of::<u32>() * child_count as usize)?;
-            Some(Desc::new(first, last, idx))
-        } else {
-            None
-        };
-
-        let values = if ost.has_values() {
-            let count = ptr.read_u32()?;
-            Some(Values::new(count, ptr.idx))
-        } else {
-            None
-        };
         Ok(Self {
             buf,
             prefix,
@@ -297,49 +380,136 @@ impl<'a> Node<'a> {
         }
     }
 
-    fn read_child(&self, char: u8) -> Result<Self, FindErr> {
+    fn child(&self, char: u8) -> Result<Self, FindErr> {
         let desc = self.desc.ok_or(FindErr::NoChild)?;
-        if desc.first <= char && char <= desc.last {
-            let child_idx = (char - desc.first) as usize;
-            let idx = desc.idx + size_of::<u32>() * child_idx;
-            let mut ptr = Ptr::new(self.buf, idx);
-            let ost = ptr.read_u32()?;
+        if *desc.first <= char && char <= *desc.last {
+            let child_cur = (char - *desc.first) as usize;
+            let cur = desc.cur + size_of::<u32>() * child_cur;
+            let mut ptr = Ptr::new(self.buf, cur);
+            let ost = ptr.read()?;
             Self::read(self.buf, ost)
         } else {
             Err(FindErr::NotFound)
         }
     }
 
+    fn find_all(&self, key: &[u8], j: usize, state: &mut WildState<'a>) -> Result<(), FindErr> {
+        let pushed = state.strbuf.push_cstr(self.prefix.unwrap_or_default(), j);
+        for (char, child) in self.children().filter_map(Result::ok) {
+            state.strbuf.push(char);
+            child.find_all(key, 0, state)?;
+            state.strbuf.pop();
+        }
+        let pat = glob::Pattern::new(state.strbuf.str()?)?;
+        let key = std::str::from_utf8(key)?;
+        if pat.matches(key) {
+            state.vals.extend(self.values().collect::<Result<Vec<_>, _>>()?);
+        }
+        state.strbuf.popn(pushed);
+        Ok(())
+    }
+
+    fn children(&self) -> impl Iterator<Item = Result<(u8, Self), FindErr>> {
+        self.desc.into_iter().flat_map(move |desc| {
+            (*desc.first..=*desc.last).map(move |char| {
+                self.child(char).map(|node| (char, node))
+            })
+        })
+    }
+
+    //fn values(&self) -> Result<impl Iterator<Item = Value>, ReadErr> {
+    //    self.values.into_iter().flat_map(|v| {
+    //        let mut ptr = Ptr::new(self.buf, v.cur);
+    //        (0..v.count).map(move |_| ptr.read::<Value>())
+    //    }).collect()
+    //}
+
+    fn values(&self) -> impl Iterator<Item = Result<Value<'a>, ReadErr>> {
+        self.values.into_iter().flat_map(|v| {
+            let mut ptr = Ptr::new(self.buf, v.cur);
+            (0..v.count).map(move |_| ptr.read())
+        })
+    }
+
     fn find(self, key: &[u8]) -> Result<&'a CStr, FindErr> {
         let key = self.chop_prefix(key).ok_or(FindErr::Prefix)?;
         if let Some((x, xs)) = key.split_first() {
-            self.read_child(*x)?.find(xs)
+            self.child(*x)?.find(xs)
         } else if let Some(vals) = self.values
             && vals.count > 0
         {
             //assert_eq!(vals.count, 1, "does this hold?"); //todo: rm debug
             // ignore priority
-            let mut ptr = Ptr::new(self.buf, vals.idx + size_of::<u32>());
-            ptr.read_cstr().map_err(Into::into)
+            let mut ptr = Ptr::new(self.buf, vals.cur + size_of::<u32>());
+            ptr.read().map_err(Into::into)
         } else {
             Err(FindErr::NoValues)
         }
     }
 
     //todo
-    fn find_wild(self, key: &[u8]) -> Result<&'a CStr, FindErr> {
-        let key = self.chop_prefix(key).ok_or(FindErr::Prefix)?;
-        if let Some((x, xs)) = key.split_first() {
-            self.read_child(*x)?.find(xs)
-        } else if let Some(vals) = self.values
-            && vals.count > 0
-        {
-            assert_eq!(vals.count, 1, "does this hold?"); //todo: rm debug
-            // ignore priority
-            let mut ptr = Ptr::new(self.buf, vals.idx + size_of::<u32>());
-            ptr.read_cstr().map_err(Into::into)
-        } else {
-            Err(FindErr::NoValues)
+    fn find_wild(self, key: &[u8], state: &mut WildState<'a>) -> Result<(), FindErr> {
+        let prefix_len = self.prefix.map(|p| p.count_bytes()).unwrap_or_default();
+        if let Some(prefix) = self.prefix {
+            dbg!(prefix);
+            for (j, b) in prefix.to_bytes().iter().copied().enumerate() {
+                if (b == b'*' || b == b'?' || b == b'[') {
+                    dbg!(b);
+                    return self.find_all(&key[j..], j, state)
+                }
+                if (b != key[j]) {
+                    return Ok(())
+                }
+            }
         }
+        if let Ok(child) = self.child(b'*') {
+            eprintln!("child *");
+            state.strbuf.push(b'*');
+            child.find_all(&key[prefix_len..], 0, state)?;
+            state.strbuf.pop();
+        }
+        if let Ok(child) = self.child(b'?') {
+            eprintln!("child ?");
+            state.strbuf.push(b'?');
+            child.find_all(&key[prefix_len..], 0, state)?;
+            state.strbuf.pop();
+        }
+        if let Ok(child) = self.child(b'[') {
+            eprintln!("child [");
+            state.strbuf.push(b'[');
+            child.find_all(&key[prefix_len..], 0, state)?;
+            state.strbuf.pop();
+        }
+        if key[prefix_len..].is_empty() {
+            state.vals.extend(self.values().collect::<Result<Vec<_>, _>>()?);
+            return Ok(())
+        }
+
+        self.child(key[prefix_len])?.find_wild(&key[prefix_len + 1..], state)
     }
 }
+
+#[derive(Debug, Clone, Default)]
+struct WildState<'a> {
+    vals: Vec<Value<'a>>,
+    strbuf: StrBuf,
+}
+
+//struct Wild<'a> {
+//    buf: &'a [u8],
+//    cur: Node<'a>,
+//    vals: Vec<Value<'a>>,
+//    strbuf: StrBuf,
+//}
+//
+//impl<'a> Wild<'a> {
+//    fn find_all(&mut self, key: &[u8], j: usize) -> Result<(), FindErr> {
+//        let pushed = self.strbuf.push_cstr(self.cur.prefix.unwrap_or_default(), j);
+//        for (char, child) in self.cur.children().filter_map(Result::ok) {
+//            self.strbuf.push(char);
+//            self.find_all(key, 0)?;
+//            self.strbuf.pop();
+//        }
+//        todo!()
+//    }
+//}

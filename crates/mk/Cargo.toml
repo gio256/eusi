@@ -8,5 +8,6 @@ eusi-init = { workspace = true }
 clap = { workspace = true, features = ["derive"] }
 cpio = { workspace = true }
 eyre = { workspace = true }
+glob = { workspace = true }
 rustix = { workspace = true, features = ["mm", "system"] }
 thiserror = { workspace = true }

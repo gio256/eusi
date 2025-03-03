@@ -7,5 +7,6 @@ eusi-init = { path = "crates/init", version = "0.1.0", artifact = "bin", target 
 clap = "4"
 cpio = "0.4.1"
 eyre = "0.6"
+glob = "0.3"
 rustix = "0.38.44"
 thiserror = "2"

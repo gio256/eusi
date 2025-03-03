@@ -18,12 +18,12 @@ pub fn mod_deps() -> eyre::Result<()> {
     let buf = Mmap::new(f)?;
     let index = Index::new(&buf)?;
 
-    let key = "kvm_amd";
-    //let key = "twofish";
+    //let key = "kvm_amd";
+    let key = "twofish";
     //let key = "virtio:d00000009v*";
-    let res = index.find(key.as_bytes())?;
-    //let res = index.find_wild(key.as_bytes())?;
-    dbg!(res);
+    //let res = index.find(key.as_bytes())?;
+    index.find_wild(key.as_bytes())?;
+    //dbg!(res);
 
     Ok(())
 }

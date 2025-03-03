@@ -14,7 +14,7 @@ pub(crate) enum MmapErr {
     #[error("failed to retrieve metadata with {0}")]
     Meta(#[from] std::io::Error),
     #[error("failed to retrieve file size with {0}")]
-    Int(#[from] std::num::TryFromIntError)
+    Int(#[from] std::num::TryFromIntError),
 }
 
 impl Mmap {
