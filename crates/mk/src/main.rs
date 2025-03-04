@@ -1,7 +1,8 @@
 #![feature(let_chains)]
 
-use cpio::newc;
 use std::fs::File;
+
+use cpio::newc;
 
 mod index;
 mod kmod;

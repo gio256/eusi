@@ -1,5 +1,6 @@
-use rustix::{fd::AsFd, mm};
 use std::{fmt, fs::File, ops::Deref, ptr, slice};
+
+use rustix::{fd::AsFd, mm};
 use thiserror::Error;
 
 pub(crate) struct Mmap {

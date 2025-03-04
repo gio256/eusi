@@ -1,8 +1,6 @@
-use std::fs::File;
-use std::path::Path;
+use std::{fs::File, path::Path};
 
-use crate::index::Index;
-use crate::mmap::Mmap;
+use crate::{index::Index, mmap::Mmap};
 
 // todo:
 // - normalize module names

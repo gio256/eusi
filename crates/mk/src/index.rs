@@ -1,9 +1,7 @@
 //! Tools to read linux kernel module index files written by libkmod.
 
-use std::ffi::CStr;
-use std::fmt;
-use std::ops::Deref;
-use std::{marker::PhantomData, mem::size_of};
+use std::{ffi::CStr, fmt, marker::PhantomData, mem::size_of, ops::Deref};
+
 use thiserror::Error;
 
 /// Magic bytes stored at the beginning of every kernel module index file.

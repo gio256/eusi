@@ -1,6 +1,7 @@
+use std::{fs, os::unix::process::CommandExt, process::Command};
+
 use eyre::Result;
 use rustix::mount::{MountFlags, mount};
-use std::{fs, os::unix::process::CommandExt, process::Command};
 
 fn mkmount(src: &str, tgt: &str, fstype: &str, flags: MountFlags, data: &str) -> Result<()> {
     fs::create_dir_all(tgt)?;
