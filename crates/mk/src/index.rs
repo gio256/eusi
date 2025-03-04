@@ -1,6 +1,7 @@
 #![allow(unused)]
 use std::ffi::CStr;
 use std::fmt;
+use std::iter::zip;
 use std::ops::Deref;
 use std::slice::SliceIndex;
 use std::{marker::PhantomData, mem::size_of};
@@ -47,9 +48,8 @@ impl<'a> Index<'a> {
     }
 
     pub fn find_wild(&self, key: &[u8]) -> Result<(), IndexErr> {
-        let mut state = WildState::default();
-        self.root.clone().find_wild(key, &mut state)?;
-        dbg!(state.vals);
+        let tmp = Wild::default().find(&self.root, key)?;
+        dbg!(tmp);
         Ok(())
     }
 }
@@ -289,15 +289,18 @@ impl<'a> Read<'a> for Values<'a> {
 
 #[derive(Debug, Clone, Default)]
 struct StrBuf {
-    v: Vec<u8>
+    v: Vec<u8>,
 }
 
 impl StrBuf {
     fn push_cstr(&mut self, s: &CStr, cur: usize) -> usize {
-        s.to_bytes().get(cur..).map(|b| {
-            self.v.extend_from_slice(b);
-            b.len()
-        }).unwrap_or_default()
+        s.to_bytes()
+            .get(cur..)
+            .map(|b| {
+                self.v.extend_from_slice(b);
+                b.len()
+            })
+            .unwrap_or_default()
     }
     fn push(&mut self, b: u8) {
         self.v.push(b)
@@ -336,7 +339,7 @@ pub(crate) enum FindErr {
     #[error("could not decode string: {0}")]
     BadUtf8(#[from] std::str::Utf8Error),
     #[error("invalid glob patter: {0}")]
-    Pattern(#[from] glob::PatternError)
+    Pattern(#[from] glob::PatternError),
 }
 
 impl fmt::Debug for Node<'_> {
@@ -371,6 +374,7 @@ impl<'a> Node<'a> {
         })
     }
 
+    //todo: what happens if the prefix is longer than the key?
     fn chop_prefix<'k>(&self, key: &'k [u8]) -> Option<&'k [u8]> {
         if let Some(prefix) = self.prefix {
             dbg!(prefix);
@@ -403,7 +407,9 @@ impl<'a> Node<'a> {
         let pat = glob::Pattern::new(state.strbuf.str()?)?;
         let key = std::str::from_utf8(key)?;
         if pat.matches(key) {
-            state.vals.extend(self.values().collect::<Result<Vec<_>, _>>()?);
+            state
+                .vals
+                .extend(self.values().collect::<Result<Vec<_>, _>>()?);
         }
         state.strbuf.popn(pushed);
         Ok(())
@@ -411,9 +417,7 @@ impl<'a> Node<'a> {
 
     fn children(&self) -> impl Iterator<Item = Result<(u8, Self), FindErr>> {
         self.desc.into_iter().flat_map(move |desc| {
-            (*desc.first..=*desc.last).map(move |char| {
-                self.child(char).map(|node| (char, node))
-            })
+            (*desc.first..=*desc.last).map(move |char| self.child(char).map(|node| (char, node)))
         })
     }
 
@@ -449,19 +453,20 @@ impl<'a> Node<'a> {
 
     //todo
     fn find_wild(self, key: &[u8], state: &mut WildState<'a>) -> Result<(), FindErr> {
+        //todo: this is wrong in the case '*' appears before the end of the prefix
         let prefix_len = self.prefix.map(|p| p.count_bytes()).unwrap_or_default();
         if let Some(prefix) = self.prefix {
             dbg!(prefix);
             for (j, b) in prefix.to_bytes().iter().copied().enumerate() {
-                if (b == b'*' || b == b'?' || b == b'[') {
-                    dbg!(b);
-                    return self.find_all(&key[j..], j, state)
+                if b == b'*' || b == b'?' || b == b'[' {
+                    return self.find_all(&key[j..], j, state);
                 }
-                if (b != key[j]) {
-                    return Ok(())
+                if b != key[j] {
+                    return Ok(());
                 }
             }
         }
+
         if let Ok(child) = self.child(b'*') {
             eprintln!("child *");
             state.strbuf.push(b'*');
@@ -481,11 +486,14 @@ impl<'a> Node<'a> {
             state.strbuf.pop();
         }
         if key[prefix_len..].is_empty() {
-            state.vals.extend(self.values().collect::<Result<Vec<_>, _>>()?);
-            return Ok(())
+            state
+                .vals
+                .extend(self.values().collect::<Result<Vec<_>, _>>()?);
+            return Ok(());
         }
 
-        self.child(key[prefix_len])?.find_wild(&key[prefix_len + 1..], state)
+        self.child(key[prefix_len])?
+            .find_wild(&key[prefix_len + 1..], state)
     }
 }
 
@@ -495,21 +503,102 @@ struct WildState<'a> {
     strbuf: StrBuf,
 }
 
-//struct Wild<'a> {
-//    buf: &'a [u8],
-//    cur: Node<'a>,
-//    vals: Vec<Value<'a>>,
-//    strbuf: StrBuf,
-//}
-//
-//impl<'a> Wild<'a> {
-//    fn find_all(&mut self, key: &[u8], j: usize) -> Result<(), FindErr> {
-//        let pushed = self.strbuf.push_cstr(self.cur.prefix.unwrap_or_default(), j);
-//        for (char, child) in self.cur.children().filter_map(Result::ok) {
-//            self.strbuf.push(char);
-//            self.find_all(key, 0)?;
-//            self.strbuf.pop();
-//        }
-//        todo!()
-//    }
-//}
+#[derive(Debug, Clone, Default)]
+struct Wild<'a> {
+    v: Vec<Value<'a>>,
+    strbuf: StrBuf,
+}
+
+struct SplitFirst<'a, T> {
+    v: &'a [T],
+}
+
+impl<'a, T> SplitFirst<'a, T> {
+    fn new(v: &'a [T]) -> Self {
+        Self { v }
+    }
+}
+
+impl<'a, T> Iterator for SplitFirst<'a, T>
+where
+    T: Copy,
+{
+    type Item = (T, &'a [T]);
+    fn next(&mut self) -> Option<Self::Item> {
+        let (x, xs) = self.v.split_first()?;
+        self.v = xs;
+        Some((*x, xs))
+    }
+}
+
+impl<'a> Wild<'a> {
+    fn traverse(&mut self, node: &Node<'a>, key: &[u8], j: usize) -> Result<(), FindErr> {
+        let pushed = self.strbuf.push_cstr(node.prefix.unwrap_or_default(), j);
+        for (char, child) in node.children().filter_map(Result::ok) {
+            self.strbuf.push(char);
+            self.traverse(&child, key, 0)?;
+            self.strbuf.pop();
+        }
+        let pat = glob::Pattern::new(self.strbuf.str()?)?;
+        let key = std::str::from_utf8(key)?;
+        if pat.matches(key) {
+            self.add_values(node)?;
+        }
+        self.strbuf.popn(pushed);
+        Ok(())
+    }
+
+    fn traverse_child(&mut self, node: &Node<'a>, key: &[u8], char: u8) -> Result<(), FindErr> {
+        if let Ok(child) = node.child(char) {
+            self.strbuf.push(char);
+            self.traverse(&child, key, 0)?;
+            self.strbuf.pop();
+        }
+        Ok(())
+    }
+
+    fn add_values(&mut self, node: &Node<'a>) -> Result<(), ReadErr> {
+        node.values()
+            .collect::<Result<Vec<_>, _>>()
+            .map(|xs| self.v.extend(xs))
+    }
+
+    fn find(mut self, node: &Node<'a>, mut key: &[u8]) -> Result<Vec<Value<'a>>, FindErr> {
+        self.find_all(node, key)?;
+        Ok(self.v)
+    }
+
+    fn find_all(&mut self, node: &Node<'a>, mut key: &[u8]) -> Result<(), FindErr> {
+        if let Some(prefix) = node.prefix {
+            let mut j = 0;
+            for &b in prefix.to_bytes() {
+                if b == b'*' || b == b'?' || b == b'[' {
+                    return self.traverse(node, &key[j..], j);
+                }
+                // if the key is exhausted or we have a prefix mismatch, end
+                // the search.
+                if key.get(j).is_none_or(|&k| k != b) {
+                    return Ok(());
+                }
+
+                //if let Some(&x) = key.get(j) {
+                //    if b != x {
+                //        return Ok(())
+                //    }
+                //} else {
+                //    return Ok(())
+                //}
+                j += 1;
+            }
+            key = &key[j..];
+        }
+        self.traverse_child(node, key, b'*')?;
+        self.traverse_child(node, key, b'?')?;
+        self.traverse_child(node, key, b'[')?;
+        if let Some((x, xs)) = key.split_first() {
+            self.find_all(&node.child(*x)?, xs)
+        } else {
+            self.add_values(node).map_err(Into::into)
+        }
+    }
+}
