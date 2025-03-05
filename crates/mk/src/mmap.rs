@@ -19,7 +19,7 @@ pub(crate) enum MmapErr {
 }
 
 impl Mmap {
-    pub(crate) fn new(f: File) -> Result<Self, MmapErr> {
+    pub(crate) fn map(f: File) -> Result<Self, MmapErr> {
         let len: usize = f.metadata()?.len().try_into()?;
         let ptr = unsafe {
             mm::mmap(

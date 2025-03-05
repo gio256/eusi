@@ -16,7 +16,7 @@ const INDEX_VERSION_MAJOR: u32 = 0x02;
 /// The maximum value for an ASCII character.
 const ASCII_MAX: u8 = 127;
 
-/// Wildcard characters that mark the beginning of a wildcard search.
+/// Characters that mark the beginning of a wildcard search.
 const WILD_CHARS: [u8; 3] = [b'*', b'?', b'['];
 
 /// A wrapper over a valid in-memory kernel module index file.
@@ -355,7 +355,7 @@ impl<'a> Node<'a> {
     fn read(buf: &'a [u8], ost: u32) -> Result<Self, FindErr> {
         let ost = Offset::new(ost);
         let cur = ost.cur() as usize;
-        if cur == 0 || buf.len() <= cur {
+        if cur == 0 {
             return Err(FindErr::NotFound);
         }
         let mut ptr = Ptr::new(buf, cur);
@@ -391,7 +391,6 @@ impl<'a> Node<'a> {
 
     fn chop_prefix<'k>(&self, key: &'k [u8]) -> Option<&'k [u8]> {
         if let Some(prefix) = self.prefix {
-            dbg!(prefix);
             key.strip_prefix(prefix.to_bytes())
         } else {
             Some(key)
@@ -465,16 +464,6 @@ impl<'a> Wild<'a> {
         Ok(())
     }
 
-    fn traverse_children<I>(&mut self, node: &Node<'a>, key: &[u8], chars: I) -> Result<(), FindErr>
-    where
-        I: IntoIterator<Item = u8>,
-    {
-        for char in chars {
-            self.traverse_child(node, key, char)?
-        }
-        Ok(())
-    }
-
     fn add_values(&mut self, node: &Node<'a>) -> Result<(), ReadErr> {
         node.values()
             .collect::<Result<Vec<_>, _>>()
@@ -498,9 +487,11 @@ impl<'a> Wild<'a> {
             }
             key = &key[j..];
         }
-        self.traverse_children(node, key, WILD_CHARS)?;
-        if let Some((x, xs)) = key.split_first() {
-            self.find_all(&node.child(*x)?, xs)
+        for char in WILD_CHARS {
+            self.traverse_child(node, key, char)?;
+        }
+        if let Some((&x, xs)) = key.split_first() {
+            self.find_all(&node.child(x)?, xs)
         } else {
             self.add_values(node).map_err(Into::into)
         }
