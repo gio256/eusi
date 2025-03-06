@@ -1,8 +1,9 @@
-#![feature(let_chains)]
+#![feature(let_chains, ascii_char, ascii_char_variants)]
 use std::fs::File;
 
 use cpio::newc;
 
+mod ascii;
 mod index;
 mod kmod;
 mod mmap;

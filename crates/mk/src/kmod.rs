@@ -8,7 +8,7 @@ use std::{
 
 use thiserror::Error;
 
-use crate::{index::Index, mmap::Mmap};
+use crate::{ascii::chars, index::Index, mmap::Mmap};
 
 const KMOD_INDEX: Kmod<&'static str> = Kmod {
     dep: "modules.dep.bin",
@@ -30,6 +30,8 @@ pub(crate) enum KmodErr {
     Mmap(#[from] crate::mmap::MmapErr),
     #[error("IO error: {0}")]
     IO(#[from] std::io::Error),
+    #[error(transparent)]
+    Ascii(#[from] crate::ascii::AsciiErr),
 }
 
 struct Kmod<T> {
@@ -101,7 +103,7 @@ fn run(dir: &Path) -> Result<(), KmodErr> {
     //// modprobe --resolve-alias "twofish"
     let key = "twofish";
     //let key = "usb:v152Dp0567d011[4-7]dc*dsc*dp*ic*isc*ip*in*";
-    let res = kmod.alias.find_wild(key.as_bytes())?;
+    let res = kmod.alias.find_wild(chars(key.as_bytes())?)?;
     dbg!(res);
     Ok(())
 }
